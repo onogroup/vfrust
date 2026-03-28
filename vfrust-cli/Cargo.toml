@@ -1,0 +1,15 @@
+[package]
+name = "vfrust-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Demo CLI for vfrust - macOS Virtualization.framework VM manager"
+
+[dependencies]
+vfrust = { path = "../vfrust" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+core-foundation-sys = "0.8"

@@ -1,0 +1,113 @@
+[package]
+name = "vfrust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust library for macOS Virtualization.framework VM management"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+    "NSURL",
+    "NSData",
+    "NSFileHandle",
+    "NSObject",
+    "NSNotification",
+] }
+objc2-virtualization = { version = "0.3", features = [
+    "block2",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZLinuxBootLoader",
+    "VZEFIBootLoader",
+    "VZMacOSBootLoader",
+    "VZGenericPlatformConfiguration",
+    "VZMacPlatformConfiguration",
+    "VZGenericMachineIdentifier",
+    "VZMacHardwareModel",
+    "VZMacMachineIdentifier",
+    "VZMacAuxiliaryStorage",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZNVMExpressControllerDeviceConfiguration",
+    "VZUSBMassStorageDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    "VZDiskBlockDeviceStorageDeviceAttachment",
+    "VZNetworkBlockDeviceStorageDeviceAttachment",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZFileHandleNetworkDeviceAttachment",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZVirtioConsoleDeviceConfiguration",
+    "VZFileSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketListener",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketConnection",
+    "VZVirtioGraphicsDeviceConfiguration",
+    "VZVirtioGraphicsScanoutConfiguration",
+    "VZMacGraphicsDeviceConfiguration",
+    "VZMacGraphicsDisplayConfiguration",
+    "VZGraphicsDisplayConfiguration",
+    "VZUSBKeyboardConfiguration",
+    "VZUSBScreenCoordinatePointingDeviceConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZSharedDirectory",
+    "VZSingleDirectoryShare",
+    "VZMultipleDirectoryShare",
+    "VZLinuxRosettaDirectoryShare",
+    "VZLinuxRosettaCachingOptions",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
+    "VZEFIVariableStore",
+    "VZVirtualMachineDelegate",
+    "VZMACAddress",
+    "VZStorageDeviceConfiguration",
+    "VZStorageDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZNetworkDeviceAttachment",
+    "VZSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZGraphicsDeviceConfiguration",
+    "VZGraphicsDevice",
+    "VZKeyboardConfiguration",
+    "VZPointingDeviceConfiguration",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZEntropyDeviceConfiguration",
+    "VZMemoryBalloonDeviceConfiguration",
+    "VZBootLoader",
+    "VZPlatformConfiguration",
+    "VZConsoleDeviceConfiguration",
+    "VZNetworkDevice",
+    "VZDiskSynchronizationMode",
+    "VZVirtioSoundDeviceConfiguration",
+    "VZVirtioSoundDeviceStreamConfiguration",
+    "VZVirtioSoundDeviceInputStreamConfiguration",
+    "VZVirtioSoundDeviceOutputStreamConfiguration",
+    "VZHostAudioInputStreamSource",
+    "VZHostAudioOutputStreamSink",
+    "VZAudioDeviceConfiguration",
+    "VZAudioInputStreamSource",
+    "VZAudioOutputStreamSink",
+    "VZXHCIControllerConfiguration",
+    "VZUSBControllerConfiguration",
+] }
+block2 = "0.6"
+dispatch2 = "0.3"
+libc = "0.2"
+thiserror = "2"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+dirs = "6"
