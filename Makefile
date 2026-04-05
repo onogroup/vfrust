@@ -25,12 +25,12 @@ test-e2e:
 	            target/debug/deps/network-* target/debug/deps/cloudinit_e2e-* \
 	            target/debug/deps/serial-* target/debug/deps/devices-* \
 	            target/debug/deps/storage-* target/debug/deps/fs_share-* \
-	            target/debug/deps/vm_snapshot-*; do \
+	            target/debug/deps/snapshot-*; do \
 	    if [ -f "$$bin" ] && [ -x "$$bin" ]; then \
 	        codesign --force --entitlements vfrust.entitlements -s - "$$bin" 2>/dev/null || true; \
 	    fi; \
 	done
-	cargo test --tests --test-threads=1 -- $(ARGS)
+	cargo test --tests -- --test-threads=1 $(ARGS)
 
 test: test-unit test-e2e
 

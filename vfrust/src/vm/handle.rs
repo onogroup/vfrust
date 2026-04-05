@@ -20,6 +20,7 @@ pub struct VmHandle {
     state_tx: watch::Sender<VmState>,
     state_rx: watch::Receiver<VmState>,
     config: VmConfig,
+    snapshot: VmConfig,
 }
 
 // Safety: VmHandle only dispatches closures onto the VM's serial queue.
@@ -35,6 +36,7 @@ impl VmHandle {
             state_tx: inner.state_tx.clone(),
             state_rx: inner.state_tx.subscribe(),
             config: inner.config.clone(),
+            snapshot: inner.snapshot.clone(),
         }
     }
 
@@ -58,9 +60,16 @@ impl VmHandle {
         self.state_rx.clone()
     }
 
-    /// Get a snapshot of the VM configuration.
+    /// Get the original configuration (auto-generated values not filled in).
     pub fn config(&self) -> &VmConfig {
         &self.config
+    }
+
+    /// Get the resolved configuration with all auto-generated values filled in.
+    ///
+    /// See [`VirtualMachine::snapshot_config`] for details.
+    pub fn snapshot_config(&self) -> &VmConfig {
+        &self.snapshot
     }
 
     /// Start the VM.

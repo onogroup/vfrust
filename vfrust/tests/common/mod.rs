@@ -6,7 +6,7 @@ use std::time::Duration;
 use vfrust::config::bootloader::{Bootloader, EfiBootloader, LinuxBootloader};
 use vfrust::config::device::network::{MacAddress, NetAttachment, VirtioNet};
 use vfrust::config::device::serial::{SerialAttachment, VirtioSerial};
-use vfrust::config::device::storage::{UsbMassStorage, VirtioBlk};
+use vfrust::config::device::storage::VirtioBlk;
 use vfrust::config::device::Device;
 use vfrust::{VmConfig, VmState};
 
@@ -308,21 +308,17 @@ pub fn create_cloudinit_iso(test_name: &str) -> TestFile {
 // Unique MAC address generation (avoids DHCP lease conflicts between tests)
 // ---------------------------------------------------------------------------
 
-/// Generate a random locally-administered MAC address.
-/// Bit 1 of first octet = 1 (locally administered), bit 0 = 0 (unicast).
-fn random_local_mac() -> MacAddress {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id() as u16;
-    MacAddress([
-        0x02, // locally administered, unicast
-        0x00,
-        (pid >> 8) as u8,
-        pid as u8,
-        (n >> 8) as u8,
-        n as u8,
-    ])
+/// Fixed locally-administered MAC address for tests.
+///
+/// Uses a constant MAC so that the host ARP cache entry for the VM's IP
+/// (assigned via DHCP) stays valid across test runs. Virtualization.framework
+/// NAT always assigns the same IP to the same DHCP identifier, so using a
+/// consistent MAC prevents stale ARP entries from blocking SSH connectivity
+/// (macOS ARP timeout is 20 minutes).
+///
+/// This is safe because E2E tests run with `--test-threads=1`.
+fn test_mac() -> MacAddress {
+    MacAddress([0x02, 0x00, 0xDE, 0xAD, 0xBE, 0xEF])
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +351,7 @@ pub fn efi_vm_config(
         }))
         .device(Device::VirtioNet(VirtioNet {
             attachment: NetAttachment::Nat,
-            mac_address: Some(random_local_mac()),
+            mac_address: Some(test_mac()),
         }))
         .device(Device::VirtioRng);
 
@@ -368,9 +364,10 @@ pub fn efi_vm_config(
     }
 
     if let Some(iso) = cloudinit_iso {
-        builder = builder.device(Device::UsbMassStorage(UsbMassStorage {
+        builder = builder.device(Device::VirtioBlk(VirtioBlk {
             path: iso.to_path_buf(),
             read_only: true,
+            ..Default::default()
         }));
     }
 
@@ -405,41 +402,84 @@ pub fn linux_vm_config(kernel: &Path, initrd: &Path, serial_log: &Path) -> VmCon
 // VM interaction helpers
 // ---------------------------------------------------------------------------
 
-/// Find the VM's IP by reading it from the serial log.
-/// The VM is configured with cloud-init which enables DHCP. We wait for
-/// the serial log to show the IP address assignment, then verify SSH works.
-/// Falls back to subnet scanning if serial log isn't available.
+/// Format a `MacAddress` the way macOS `arp -an` displays it
+/// (lowercase, no leading zeros, colon-separated).
+fn mac_to_arp_format(mac: &MacAddress) -> String {
+    mac.0
+        .iter()
+        .map(|b| format!("{b:x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Look up an IP address in the host ARP table by MAC address.
+///
+/// Parses `arp -an` output for a line matching the given MAC on a bridge
+/// interface and extracts the IP.
+fn resolve_ip_from_arp(mac_str: &str) -> Option<String> {
+    let output = Command::new("arp").arg("-an").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        // Format: ? (192.168.64.2) at 2:0:de:ad:be:ef on bridge100 ...
+        if line.contains(mac_str) && line.contains("bridge") {
+            let start = line.find('(')? + 1;
+            let end = line.find(')')?;
+            return Some(line[start..end].to_string());
+        }
+    }
+    None
+}
+
+/// Find the VM's IP address by MAC + hostname verification.
+///
+/// 1. Polls the host ARP table for the test MAC (instant, no SSH).
+/// 2. Once the IP is known, verifies SSH connectivity and hostname.
 pub async fn find_vm_ip(expected_hostname: &str, timeout: Duration) -> Option<String> {
     let hostname = expected_hostname.to_string();
+    let mac_str = mac_to_arp_format(&test_mac());
+
     tokio::task::spawn_blocking(move || {
         let start = std::time::Instant::now();
+        let key_path = dirs::home_dir().unwrap().join(".ssh/id_ed25519");
+
+        // Phase 1: resolve IP from ARP table (sub-second once VM has DHCP)
+        let ip = loop {
+            if start.elapsed() >= timeout {
+                return None;
+            }
+            if let Some(ip) = resolve_ip_from_arp(&mac_str) {
+                break ip;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        };
+
+        // Phase 2: wait for SSH + correct hostname on the known IP
         while start.elapsed() < timeout {
-            // Scan all IPs and check hostname via SSH
-            for i in 2..=30 {
-                let ip = format!("192.168.64.{i}");
-                // Use SSH directly — ConnectTimeout=2 keeps it quick for non-responding IPs
-                let output = Command::new("ssh")
-                    .args([
-                        "-o", "StrictHostKeyChecking=no",
-                        "-o", "UserKnownHostsFile=/dev/null",
-                        "-o", "ConnectTimeout=1",
-                        "-o", "BatchMode=yes",
-                        "-o", "LogLevel=ERROR",
-                        "-i",
-                        &dirs::home_dir().unwrap().join(".ssh/id_ed25519").to_string_lossy(),
-                        &format!("ubuntu@{ip}"),
-                        "hostname",
-                    ])
-                    .output();
-                if let Ok(out) = output {
-                    if out.status.success() {
-                        let actual = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                        if actual == hostname {
-                            return Some(ip);
-                        }
+            let output = Command::new("ssh")
+                .args([
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null",
+                    "-o", "ConnectTimeout=2",
+                    "-o", "BatchMode=yes",
+                    "-o", "LogLevel=ERROR",
+                    "-i",
+                    &key_path.to_string_lossy(),
+                    &format!("ubuntu@{ip}"),
+                    "hostname",
+                ])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let actual = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if actual == hostname {
+                        return Some(ip);
                     }
                 }
             }
+            std::thread::sleep(Duration::from_secs(2));
         }
         None
     })

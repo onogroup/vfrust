@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bootloader::Bootloader;
 use super::device::Device;
-use super::platform::Platform;
+use super::platform::{MachineIdentifier, Platform};
 
 /// Complete, validated VM configuration. Immutable once built.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +13,13 @@ pub struct VmConfig {
     pub(crate) platform: Platform,
     pub(crate) devices: Vec<Device>,
     pub(crate) nested: bool,
+    /// Optional machine identifier for the Generic platform (ignored for macOS).
+    ///
+    /// When `Some`, the VM is created with this identity (required for
+    /// save/restore — the save file is bound to the identifier).
+    /// When `None`, Virtualization.framework auto-generates a new identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_identifier: Option<MachineIdentifier>,
 }
 
 impl VmConfig {
@@ -44,6 +51,16 @@ impl VmConfig {
         self.nested
     }
 
+    /// The machine identifier for the Generic platform, if present.
+    ///
+    /// On a config obtained from [`VirtualMachine::snapshot_config`] /
+    /// [`VmHandle::snapshot_config`] this is the actual identifier in use
+    /// (including auto-generated ones).  On a builder-created config it is
+    /// only present when explicitly set via [`VmBuilder::machine_identifier`].
+    pub fn machine_identifier(&self) -> Option<&MachineIdentifier> {
+        self.machine_identifier.as_ref()
+    }
+
     pub fn from_json(path: &std::path::Path) -> crate::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         serde_json::from_str(&content).map_err(|e| crate::Error::InvalidConfiguration(e.to_string()))
@@ -62,6 +79,7 @@ pub struct VmBuilder {
     platform: Platform,
     devices: Vec<Device>,
     nested: bool,
+    machine_identifier: Option<MachineIdentifier>,
 }
 
 impl VmBuilder {
@@ -100,6 +118,20 @@ impl VmBuilder {
         self
     }
 
+    /// Set the machine identifier for the Generic platform.
+    ///
+    /// Required when restoring from a save file, since the save is bound to
+    /// the identifier that was active when `saveMachineState` was called.
+    /// Obtain it from [`VirtualMachine::snapshot_config`] or
+    /// [`VmHandle::snapshot_config`].
+    ///
+    /// Ignored when the platform is [`Platform::MacOs`] (macOS uses its own
+    /// `VZMacMachineIdentifier` loaded from a file).
+    pub fn machine_identifier(mut self, id: MachineIdentifier) -> Self {
+        self.machine_identifier = Some(id);
+        self
+    }
+
     pub fn build(self) -> crate::Result<VmConfig> {
         let cpus = self.cpus.unwrap_or(1);
         let memory_mib = self.memory_mib.unwrap_or(512);
@@ -125,6 +157,7 @@ impl VmBuilder {
             platform: self.platform,
             devices: self.devices,
             nested: self.nested,
+            machine_identifier: self.machine_identifier,
         })
     }
 }

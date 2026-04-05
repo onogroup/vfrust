@@ -1,3 +1,7 @@
+use std::sync::Mutex;
+
+use block2::RcBlock;
+
 use crate::config::vm::VmConfig;
 use crate::sys::machine::InnerMachine;
 use crate::vm::handle::VmHandle;
@@ -23,9 +27,23 @@ impl VirtualMachine {
         *self.inner.state_tx.borrow()
     }
 
-    /// Get the configuration this VM was created with.
+    /// Get the original configuration this VM was created with.
+    ///
+    /// Auto-generated values (MACs, machine identifier) are **not** filled in.
+    /// Use [`snapshot_config`](Self::snapshot_config) for a config suitable for
+    /// save/restore round-trips.
     pub fn config(&self) -> &VmConfig {
         &self.inner.config
+    }
+
+    /// Get the resolved configuration with all auto-generated values filled in.
+    ///
+    /// This includes MAC addresses and the Generic-platform machine identifier
+    /// that Virtualization.framework assigned at creation time.  Persist this
+    /// (via [`VmConfig::to_json`]) alongside save files so the restore VM can
+    /// be created with matching identity.
+    pub fn snapshot_config(&self) -> &VmConfig {
+        &self.inner.snapshot
     }
 
     /// Create a thread-safe handle for cross-thread VM control.
@@ -83,15 +101,45 @@ impl VirtualMachine {
     }
 }
 
+/// Drop force-stops a running VM and clears the ObjC delegate before
+/// deallocating.  This blocks the current thread for up to 7 seconds
+/// (5s stop + 2s delegate clear).  Callers in async contexts should
+/// call [`VirtualMachine::stop`] explicitly before dropping.
 impl Drop for VirtualMachine {
     fn drop(&mut self) {
-        // Clear the delegate on the VM's dispatch queue to prevent callbacks
-        // to a dropped delegate object. The Retained<VZVirtualMachine> will
-        // be released when InnerMachine drops, which is safe from any thread
-        // for ref-counted ObjC objects.
         let vm_ptr = self.inner.vm_ptr();
-        self.inner.queue.exec_async(move || unsafe {
-            vm_ptr.get().setDelegate(None);
+        let state = *self.inner.state_tx.borrow();
+
+        // If the VM is running, paused, or in an error state, force-stop it
+        // synchronously before dropping. This prevents the ObjC
+        // VZVirtualMachine from being deallocated while still active.
+        if state.can_stop() {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.inner.queue.exec_async(move || {
+                let reply = Mutex::new(Some(tx));
+                let block = RcBlock::new(move |err: *mut objc2_foundation::NSError| {
+                    if let Some(tx) = reply.lock().unwrap().take() {
+                        if err.is_null() {
+                            let _ = tx.send(Ok(()));
+                        } else {
+                            let _ = tx.send(Err(()));
+                        }
+                    }
+                });
+                unsafe { vm_ptr.get().stopWithCompletionHandler(&block) };
+            });
+            // Wait up to 5s for the stop to complete.
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+
+        // Clear the delegate to prevent callbacks to dropped objects.
+        let vm_ptr = self.inner.vm_ptr();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        self.inner.queue.exec_async(move || {
+            unsafe { vm_ptr.get().setDelegate(None) };
+            let _ = done_tx.send(());
         });
+        // Wait for delegate clear to complete before InnerMachine drops.
+        let _ = done_rx.recv_timeout(std::time::Duration::from_secs(2));
     }
 }

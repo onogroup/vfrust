@@ -17,7 +17,7 @@ pub use config::{
         vsock::VirtioVsock,
         Device,
     },
-    platform::{MacOsPlatform, Platform},
+    platform::{MachineIdentifier, MacOsPlatform, Platform},
     vm::{VmBuilder, VmConfig},
 };
 pub use error::{Error, Result, VzErrorCode};

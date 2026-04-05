@@ -94,15 +94,16 @@ async fn test_additional_disk() {
         .await
         .expect("VM should get an IP");
 
-    let result = common::ssh_retry(
+    // Count virtio block devices: vda (root) + vdb (cloud-init ISO) + vdc (extra disk)
+    let count = common::ssh_retry(
         &ip,
-        "lsblk -d -n -o NAME | sort | tail -1",
+        "lsblk -d -n -o NAME | grep -c '^vd'",
         Duration::from_secs(30),
     )
     .expect("ssh lsblk should succeed");
     assert!(
-        result.contains("vdb") || result.contains("sdb"),
-        "second disk should be visible, got: {result}"
+        count.trim().parse::<u32>().unwrap_or(0) >= 3,
+        "expected at least 3 virtio block devices, got: {count}"
     );
 
     common::stop_and_wait(&handle).await;

@@ -82,7 +82,12 @@ pub(crate) struct InnerMachine {
     pub(crate) _delegate: Retained<VmDelegate>,
     pub(crate) queue: DispatchRetained<DispatchQueue>,
     pub(crate) state_tx: watch::Sender<VmState>,
+    /// The original config as passed by the caller (never mutated).
     pub(crate) config: VmConfig,
+    /// A copy of `config` with all auto-generated values (MACs, machine
+    /// identifier) resolved from Virtualization.framework.  Use this for
+    /// save/restore round-trips.
+    pub(crate) snapshot: VmConfig,
 }
 
 impl InnerMachine {
@@ -126,6 +131,61 @@ impl InnerMachine {
             }
         });
 
+        // Build a snapshot config with all auto-generated values resolved.
+        // The original `config` stays untouched so it can be reused as a
+        // template for spawning additional VMs.
+        let snapshot = {
+            let mut snap = config.clone();
+
+            // Read back auto-generated MACs from the VZ config.
+            // `build_devices` pushes VirtioNet configs in iteration order, so
+            // `net_idx` stays in sync with `vz_config.networkDevices()`.
+            {
+                let net_devices = unsafe { vz_config.networkDevices() };
+                let count = net_devices.count();
+                let mut net_idx = 0usize;
+                for device in &mut snap.devices {
+                    if let crate::config::device::Device::VirtioNet(ref mut net) = device {
+                        if net.mac_address.is_none() && net_idx < count {
+                            let vz_dev = net_devices.objectAtIndex(net_idx);
+                            let vz_mac = unsafe { vz_dev.MACAddress() };
+                            let mac_str = unsafe { vz_mac.string() }.to_string();
+                            if let Some(parsed) = crate::config::device::network::MacAddress::parse(&mac_str) {
+                                net.mac_address = Some(parsed);
+                            }
+                        }
+                        net_idx += 1;
+                    }
+                }
+            }
+
+            // Read the machine identifier (Generic platform).
+            // Captures both explicit and auto-generated identifiers.
+            if snap.machine_identifier.is_none() {
+                snap.machine_identifier = unsafe {
+                    use objc2_virtualization::{VZGenericPlatformConfiguration, VZGenericMachineIdentifier};
+                    let platform = vz_config.platform();
+                    let generic: Option<Retained<VZGenericPlatformConfiguration>> =
+                        objc2::rc::Retained::downcast(platform).ok();
+                    generic.map(|g| {
+                        let id: Retained<VZGenericMachineIdentifier> = g.machineIdentifier();
+                        let data = id.dataRepresentation();
+                        let len = data.length();
+                        let mut bytes = vec![0u8; len];
+                        if len > 0 {
+                            data.getBytes_length(
+                                std::ptr::NonNull::new(bytes.as_mut_ptr().cast()).unwrap(),
+                                len,
+                            );
+                        }
+                        bytes
+                    })
+                };
+            }
+
+            snap
+        };
+
         Ok(Self {
             vm,
             _vz_config: vz_config,
@@ -133,6 +193,7 @@ impl InnerMachine {
             queue,
             state_tx,
             config,
+            snapshot,
         })
     }
 

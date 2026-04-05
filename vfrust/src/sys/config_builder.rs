@@ -11,13 +11,11 @@ use crate::sys::device::build_devices;
 pub(crate) fn build_vz_config(
     config: &VmConfig,
 ) -> crate::Result<Retained<VZVirtualMachineConfiguration>> {
-    // Validate: nested virtualization cannot be used with macOS bootloader
-    if config.nested {
-        if matches!(config.bootloader, Bootloader::MacOs(_)) {
-            return Err(crate::Error::InvalidConfiguration(
-                "nested virtualization is not supported with macOS bootloader".into(),
-            ));
-        }
+    // Validate: nested virtualization cannot be used with macOS bootloader.
+    if config.nested && matches!(config.bootloader, Bootloader::MacOs(_)) {
+        return Err(crate::Error::InvalidConfiguration(
+            "nested virtualization is not supported with macOS bootloader".into(),
+        ));
     }
 
     unsafe {
@@ -27,7 +25,7 @@ pub(crate) fn build_vz_config(
         vz_config.setMemorySize(config.memory_mib * 1024 * 1024);
 
         // Platform
-        let platform = build_platform(&config.platform, config.nested)?;
+        let platform = build_platform(&config.platform, config.nested, config.machine_identifier.as_deref())?;
         vz_config.setPlatform(&platform);
 
         // Bootloader
@@ -54,6 +52,19 @@ pub(crate) fn build_vz_config(
             .validateWithError()
             .map_err(|e| crate::Error::ValidationFailed(e.to_string()))?;
 
+        // Check if save/restore is supported.  This is advisory — many valid
+        // configurations (e.g. with GPU or USB pass-through) do not support it.
+        // We log the result rather than failing so callers can still create
+        // the VM; save/restore will return an error at call time if unsupported.
+        match vz_config.validateSaveRestoreSupportWithError() {
+            Ok(()) => {
+                tracing::debug!("VM configuration supports save/restore");
+            }
+            Err(e) => {
+                tracing::warn!("VM configuration does NOT support save/restore: {e}");
+            }
+        }
+
         Ok(vz_config)
     }
 }
@@ -61,11 +72,25 @@ pub(crate) fn build_vz_config(
 fn build_platform(
     platform: &Platform,
     nested: bool,
+    machine_identifier: Option<&[u8]>,
 ) -> crate::Result<Retained<VZPlatformConfiguration>> {
     unsafe {
         match platform {
             Platform::Generic => {
                 let config = VZGenericPlatformConfiguration::new();
+
+                // Set machine identifier if provided (required for save/restore).
+                if let Some(id_bytes) = machine_identifier {
+                    let ns_data = objc2_foundation::NSData::with_bytes(id_bytes);
+                    let machine_id = VZGenericMachineIdentifier::initWithDataRepresentation(
+                        VZGenericMachineIdentifier::alloc(),
+                        &ns_data,
+                    )
+                    .ok_or_else(|| crate::Error::InvalidConfiguration(
+                        "invalid generic machine identifier data".into(),
+                    ))?;
+                    config.setMachineIdentifier(&machine_id);
+                }
 
                 if nested {
                     if VZGenericPlatformConfiguration::isNestedVirtualizationSupported() {
