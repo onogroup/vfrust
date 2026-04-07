@@ -1,3 +1,29 @@
 [workspace]
 members = ["vfrust", "vfrust-cli"]
 resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/onogroup/vfrust"
+homepage = "https://github.com/onogroup/vfrust"
+
+[workspace.dependencies]
+block2 = "0.6"
+clap = { version = "4", features = ["derive"] }
+core-foundation-sys = "0.8"
+dirs = "6"
+dispatch2 = "0.3"
+libc = "0.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-virtualization = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+vfrust = { path = "vfrust", version = "0.1.0" }

@@ -1,15 +1,21 @@
 [package]
 name = "vfrust-cli"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Demo CLI for vfrust - macOS Virtualization.framework VM manager"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["macos", "virtualization", "vm", "cli", "vfkit"]
+categories = ["command-line-utilities", "virtualization"]
+readme = "../README.md"
 
 [dependencies]
-vfrust = { path = "../vfrust" }
-clap = { version = "4", features = ["derive"] }
-tokio = { version = "1", features = ["full"] }
-serde_json = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-libc = "0.2"
-core-foundation-sys = "0.8"
+vfrust.workspace = true
+clap.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+libc.workspace = true
+core-foundation-sys.workspace = true

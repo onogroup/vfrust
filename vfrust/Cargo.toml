@@ -1,12 +1,18 @@
 [package]
 name = "vfrust"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 description = "Rust library for macOS Virtualization.framework VM management"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["macos", "virtualization", "vm", "apple", "vfkit"]
+categories = ["os::macos-apis", "virtualization"]
+readme = "../README.md"
 
 [dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = [
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [
     "NSArray",
     "NSDictionary",
     "NSError",
@@ -17,7 +23,7 @@ objc2-foundation = { version = "0.3", features = [
     "NSObject",
     "NSNotification",
 ] }
-objc2-virtualization = { version = "0.3", features = [
+objc2-virtualization = { workspace = true, features = [
     "block2",
     "VZVirtualMachine",
     "VZVirtualMachineConfiguration",
@@ -98,16 +104,16 @@ objc2-virtualization = { version = "0.3", features = [
     "VZXHCIControllerConfiguration",
     "VZUSBControllerConfiguration",
 ] }
-block2 = "0.6"
-dispatch2 = "0.3"
-libc = "0.2"
-thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+block2.workspace = true
+dispatch2.workspace = true
+libc.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
-tempfile = "3"
-dirs = "6"
+tokio = { workspace = true, features = ["full"] }
+tempfile.workspace = true
+dirs.workspace = true
