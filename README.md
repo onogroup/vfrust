@@ -167,6 +167,6 @@ make test         # both
 
 E2E tests are codesigned automatically and run single-threaded to avoid resource contention.
 
-## License
+## Acknowledgments
 
-See repository for license information.
+This project was heavily inspired by [vfkit](https://github.com/crc-org/vfkit).
