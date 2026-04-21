@@ -112,6 +112,18 @@ impl VirtualMachine {
     pub fn worker_pid(&self) -> Option<u32> {
         self.handle().worker_pid()
     }
+
+    /// Sample userspace-observed byte / packet counters for every Vmnet
+    /// NIC. See [`VmHandle::network_usage`].
+    pub fn network_usage(&self) -> Vec<crate::vm::network_metrics::NetworkUsage> {
+        self.handle().network_usage()
+    }
+
+    /// Metadata for every `NetAttachment::Vmnet` NIC on this VM. See
+    /// [`VmHandle::vmnet_interfaces`].
+    pub fn vmnet_interfaces(&self) -> Vec<crate::vm::network_metrics::VmnetInterface> {
+        self.handle().vmnet_interfaces()
+    }
 }
 
 /// Drop force-stops a running VM and clears the ObjC delegate before

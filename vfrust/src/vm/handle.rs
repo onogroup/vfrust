@@ -7,10 +7,11 @@ use crate::config::vm::VmConfig;
 use crate::error::Error;
 use crate::sys::machine::{
     make_completion_block, make_start_like_completion_block, make_stop_like_completion_block,
-    InnerMachine, VmPtr, WorkerSlot,
+    InnerMachine, NetworkProxies, VmPtr, WorkerSlot,
 };
 use crate::sys::process_info;
 use crate::vm::metrics::ResourceUsage;
+use crate::vm::network_metrics::{NetworkUsage, VmnetInterface};
 use crate::vm::state::VmState;
 
 /// A thread-safe handle to a [`VirtualMachine`](super::machine::VirtualMachine).
@@ -27,6 +28,7 @@ pub struct VmHandle {
     config: VmConfig,
     snapshot: VmConfig,
     worker: WorkerSlot,
+    network_proxies: NetworkProxies,
 }
 
 // Safety: VmHandle only dispatches closures onto the VM's serial queue.
@@ -44,6 +46,7 @@ impl VmHandle {
             config: inner.config.clone(),
             snapshot: inner.snapshot.clone(),
             worker: inner.worker(),
+            network_proxies: inner.network_proxies(),
         }
     }
 
@@ -335,5 +338,60 @@ impl VmHandle {
     /// Activity Monitor.
     pub fn worker_pid(&self) -> Option<u32> {
         self.worker.lock().ok()?.as_ref().map(|w| w.pid as u32)
+    }
+
+    /// Sample userspace-observed byte / packet counters for every
+    /// `NetAttachment::Vmnet` NIC on this VM, in the order the NICs were
+    /// configured.
+    ///
+    /// Returns an empty `Vec` for VMs that have no `Vmnet` attachments;
+    /// `Nat`, `UnixSocket`, and `FileDescriptor` attachments do not go
+    /// through vfrust's packet proxy and are not counted here.
+    ///
+    /// The call is sync, non-blocking, and safe from any thread.
+    pub fn network_usage(&self) -> Vec<NetworkUsage> {
+        let Ok(guard) = self.network_proxies.lock() else {
+            return Vec::new();
+        };
+        guard
+            .iter()
+            .map(|p| {
+                let s = p.sample();
+                NetworkUsage {
+                    sampled_at: s.sampled_at,
+                    rx_bytes: s.rx_bytes,
+                    tx_bytes: s.tx_bytes,
+                    rx_packets: s.rx_packets,
+                    tx_packets: s.tx_packets,
+                    rx_drops: s.rx_drops,
+                    tx_drops: s.tx_drops,
+                }
+            })
+            .collect()
+    }
+
+    /// Metadata (MAC, MTU, DHCP pool) for each `NetAttachment::Vmnet`
+    /// interface attached to this VM, in configuration order.
+    ///
+    /// Populated after `start()` returns successfully — empty otherwise,
+    /// and empty for VMs that have no `Vmnet` attachments.
+    pub fn vmnet_interfaces(&self) -> Vec<VmnetInterface> {
+        let Ok(guard) = self.network_proxies.lock() else {
+            return Vec::new();
+        };
+        guard
+            .iter()
+            .map(|p| {
+                let info = p.info();
+                VmnetInterface {
+                    mac: info.mac,
+                    mtu: info.mtu,
+                    max_packet_size: info.max_packet_size,
+                    dhcp_start: info.dhcp_start,
+                    dhcp_end: info.dhcp_end,
+                    subnet_mask: info.subnet_mask,
+                }
+            })
+            .collect()
     }
 }

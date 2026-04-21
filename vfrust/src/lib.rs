@@ -11,7 +11,7 @@ pub use config::{
         fs::{Rosetta, SharedDir, VirtioFs},
         gpu::{MacGraphics, VirtioGpu},
         input::VirtioInput,
-        network::{MacAddress, NetAttachment, VirtioNet},
+        network::{MacAddress, NetAttachment, VirtioNet, VmnetConfig, VmnetMode},
         serial::{SerialAttachment, VirtioSerial},
         storage::{DiskBackend, DiskCachingMode, DiskSyncMode, Nbd, Nvme, UsbMassStorage, VirtioBlk},
         vsock::VirtioVsock,
@@ -25,6 +25,7 @@ pub use vm::{
     handle::VmHandle,
     machine::VirtualMachine,
     metrics::{ResourceDelta, ResourceUsage},
+    network_metrics::{NetworkDelta, NetworkUsage, VmnetInterface},
     state::VmState,
 };
 pub use vsock::VsockConnection;
