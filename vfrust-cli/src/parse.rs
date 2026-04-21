@@ -6,7 +6,9 @@ use vfrust::config::device::fs::{Rosetta, SharedDir, VirtioFs};
 use vfrust::config::device::audio::VirtioSound;
 use vfrust::config::device::gpu::{MacGraphics, VirtioGpu};
 use vfrust::config::device::input::VirtioInput;
-use vfrust::config::device::network::{MacAddress, NetAttachment, VirtioNet};
+use vfrust::config::device::network::{
+    MacAddress, NetAttachment, VirtioNet, VmnetConfig, VmnetMode,
+};
 use vfrust::config::device::serial::{SerialAttachment, VirtioSerial};
 use vfrust::config::device::storage::{
     DiskSyncMode, Nbd, Nvme, UsbMassStorage, VirtioBlk,
@@ -133,6 +135,19 @@ pub fn parse_device(spec: &str) -> Result<Device, String> {
                 NetAttachment::FileDescriptor {
                     fd: fd.parse().map_err(|_| "invalid fd value")?,
                 }
+            } else if opts.contains_key("vmnet") {
+                let mode = match opts.get("mode").map(|s| s.as_str()) {
+                    Some("host") => VmnetMode::Host,
+                    Some("bridged") => VmnetMode::Bridged,
+                    _ => VmnetMode::Shared,
+                };
+                NetAttachment::Vmnet(VmnetConfig {
+                    mode,
+                    bridged_interface: opts.get("bridgedInterface").cloned(),
+                    isolated: opts.contains_key("isolated"),
+                    allocate_mac: opts.contains_key("allocateMac"),
+                    ..VmnetConfig::default()
+                })
             } else {
                 NetAttachment::Nat
             };

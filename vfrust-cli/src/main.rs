@@ -214,6 +214,8 @@ fn main() {
         }
 
         // Periodically print host-observed resource usage if requested.
+        // Also appends per-NIC `net: {rx=…/tx=…}` for any `NetAttachment::Vmnet`
+        // devices on the VM.
         if let Some(secs) = metrics_interval_secs {
             let secs = secs.max(1);
             let handle_metrics = handle.clone();
@@ -226,8 +228,21 @@ fn main() {
                     match handle_metrics.resource_usage() {
                         Some(u) => {
                             let ts = chrono_like_timestamp();
+                            let net = handle_metrics.network_usage();
+                            let net_suffix = if net.is_empty() {
+                                String::new()
+                            } else if net.len() == 1 {
+                                format!(" net: {}", net[0])
+                            } else {
+                                let parts: Vec<String> = net
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, u)| format!("nic{i}:{u}"))
+                                    .collect();
+                                format!(" net: [{}]", parts.join(", "))
+                            };
                             println!(
-                                "[{ts}] pid={} {u}",
+                                "[{ts}] pid={} {u}{net_suffix}",
                                 handle_metrics.worker_pid().unwrap_or(0),
                             );
                         }
