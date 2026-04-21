@@ -5,7 +5,7 @@ A Rust library and CLI for managing macOS virtual machines using Apple's [Virtua
 ## Features
 
 - **Linux, EFI, and macOS boot** — direct kernel boot, UEFI, or macOS bootloader
-- **Virtio device stack** — block storage, NVMe, USB mass storage, NBD, networking (NAT / unix socket / fd passthrough), serial console, GPU, sound, filesystem sharing, vsock, RNG, balloon, input devices
+- **Virtio device stack** — block storage, NVMe, USB mass storage, NBD, networking (NAT / `vmnet.framework` / unix socket / fd passthrough), serial console, GPU, sound, filesystem sharing, vsock, RNG, balloon, input devices
 - **Rosetta support** — run x86_64 Linux binaries in ARM VMs
 - **VM lifecycle control** — start, pause, resume, stop, graceful ACPI shutdown, save/restore state
 - **Thread-safe `VmHandle`** — control VMs from any thread via a dispatch-queue-backed handle
@@ -14,13 +14,14 @@ A Rust library and CLI for managing macOS virtual machines using Apple's [Virtua
 - **Time synchronization** — optional host→guest time sync over vsock
 - **Nested virtualization** — run VMs inside VMs on supported hardware
 - **JSON config** — serialize/deserialize VM configurations
-- **Metrics** — host-observed CPU / memory / disk / page-ins / energy per VM, sampled cheaply from the VZ worker subprocess
+- **Metrics** — host-observed CPU / memory / disk / page-ins / energy per VM, sampled cheaply from the VZ worker subprocess; per-NIC byte / packet counters for `Vmnet` attachments
 
 ## Requirements
 
 - macOS (Apple Silicon or Intel with Virtualization.framework support)
 - Rust 1.70+
 - Code signing with the `com.apple.security.virtualization` entitlement (handled by the Makefile)
+- For `NetAttachment::Vmnet`: additionally the `com.apple.vm.networking` entitlement, **or** running as root (see [Entitlements](#entitlements))
 
 ## Workspace Structure
 
@@ -109,7 +110,7 @@ macos,machineIdentifierPath=<path>,hardwareModelPath=<path>,auxImagePath=<path>
 | NVMe | `nvme,path=<path>[,readonly]` |
 | USB mass storage | `usb-mass-storage,path=<path>[,readonly]` |
 | NBD | `nbd,uri=<uri>[,deviceId=<id>][,timeout=<ms>][,sync=none\|fsync\|full][,readonly]` |
-| Virtio network | `virtio-net[,nat][,unixSocketPath=<path>][,fd=<n>][,mac=<addr>]` |
+| Virtio network | `virtio-net[,nat][,vmnet[,mode=shared\|host\|bridged][,bridgedInterface=<iface>][,isolated][,allocateMac]][,unixSocketPath=<path>][,fd=<n>][,mac=<addr>]` |
 | Virtio serial | `virtio-serial,stdio` / `virtio-serial,pty` / `virtio-serial,logFilePath=<path>` |
 | Virtio vsock | `virtio-vsock,port=<n>[,socketURL=<path>][,listen]` |
 | Virtio GPU | `virtio-gpu[,width=<n>][,height=<n>]` |
@@ -159,6 +160,50 @@ let handle = vm.handle(); // Send + Sync, use from any thread
 // handle.restore_state(path).await
 ```
 
+## Networking
+
+`NetAttachment` covers four modes:
+
+| Variant | Description |
+|---|---|
+| `Nat` | Virtualization.framework's built-in NAT. Zero setup, no counters, no callbacks. |
+| `Vmnet(VmnetConfig)` | Managed networking via Apple's `vmnet.framework`. vfrust owns the packet path, which enables per-NIC byte / packet counters (see [Metrics](#metrics)). Supports `Shared` (default, `192.168.64.0/24`), `Host` (`192.168.65.0/24`), and `Bridged` modes. Requires the `com.apple.vm.networking` entitlement or root. |
+| `UnixSocket { path }` | Delegate the network path to an external unix socket. Caller owns the stack. |
+| `FileDescriptor { fd }` | Delegate the network path to an existing fd. Caller owns the stack. |
+
+```rust
+use vfrust::{NetAttachment, VmnetConfig, VmnetMode, VirtioNet};
+
+Device::VirtioNet(VirtioNet {
+    attachment: NetAttachment::Vmnet(VmnetConfig {
+        mode: VmnetMode::Shared,
+        ..Default::default()
+    }),
+    mac_address: None, // let vfrust generate one, or set to pin
+})
+```
+
+See the [`VmnetConfig`](vfrust/src/config/device/network.rs) docs for the
+full set of knobs (DHCP range override, interface isolation, bridged-NIC
+selection).
+
+## Entitlements
+
+Two entitlements are relevant:
+
+| Entitlement | Required for |
+|---|---|
+| `com.apple.security.virtualization` | Every binary using Virtualization.framework — baseline. |
+| `com.apple.vm.networking` | Any binary that uses `NetAttachment::Vmnet`. |
+
+Both are present in `vfrust.entitlements` and applied by `make sign` /
+`make test-e2e`. Downstream projects that embed vfrust must re-codesign
+their own binaries with these entitlements, or run as root for ad-hoc
+local development. Bridged-mode `Vmnet` in practice requires a
+provisioning-profile-signed binary (Apple Developer program); Shared and
+Host modes work with the ad-hoc `com.apple.vm.networking` entitlement or
+with root.
+
 ## Metrics
 
 Sample host-observed VM resource usage from a running VM:
@@ -184,13 +229,33 @@ VM — the same source Activity Monitor reads.
 The values are **host-observed**, not guest-internal: CPU time is real host
 time the hypervisor consumed, memory is host backing footprint (≈ allocated
 physical minus ballooned pages, not guest-free memory), and disk I/O is the
-aggregate across all image attachments. Network counters are not reported
-(Apple does not expose them at the framework layer). On Intel Macs the
-`energy_nj`, `instructions`, and `cycles` fields are always `0`.
+aggregate across all image attachments. On Intel Macs the `energy_nj`,
+`instructions`, and `cycles` fields are always `0`.
 
 Use `ResourceUsage::delta_since` to compute per-interval rates from two
 samples cheaply; see the [`ResourceUsage`](vfrust/src/vm/metrics.rs) doc
 comment for the full caveat list.
+
+### Per-NIC network counters (`Vmnet` only)
+
+Unlike CPU/memory/disk, network counters are **not** exposed by
+Virtualization.framework. vfrust gets them by owning the packet path for
+`NetAttachment::Vmnet` attachments — every packet traverses a userspace
+`vmnet` ↔ `socketpair` proxy, and byte / packet counts are incremented
+there.
+
+```rust
+let usage = handle.network_usage();   // Vec<NetworkUsage>, one per Vmnet NIC
+for (i, nic) in usage.iter().enumerate() {
+    println!("nic{i}: {nic}"); // rx=12MiB/458pkt tx=3MiB/127pkt
+}
+```
+
+`Nat`, `UnixSocket`, and `FileDescriptor` attachments do not go through
+the proxy and produce no entries in `network_usage()`. Callers of those
+variants can count bytes at their own layer. See
+[`NetworkUsage`](vfrust/src/vm/network_metrics.rs) for the full shape
+and the `delta_since` helper.
 
 ## Testing
 
