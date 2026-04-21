@@ -27,5 +27,6 @@ pub use vm::{
     metrics::{ResourceDelta, ResourceUsage},
     network_metrics::{NetworkDelta, NetworkUsage, VmnetInterface},
     state::VmState,
+    vmnet_probe::{probe_vmnet, VmnetProbe, VmnetReturn},
 };
 pub use vsock::VsockConnection;

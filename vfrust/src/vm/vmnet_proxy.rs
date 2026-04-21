@@ -35,7 +35,7 @@ use crate::config::device::network::{MacAddress, VmnetConfig};
 use crate::error::Error;
 use crate::sys::vmnet::{
     read_packets, set_packets_available_callback, start_interface, stop_interface, Vmpktdesc,
-    VmnetInterfaceHandle, VmnetStartParams,
+    VmnetInterfaceHandle, VmnetReturn, VmnetStartParams,
 };
 
 /// Batch size for `vmnet_read` — matches the "small handful" other
@@ -142,7 +142,19 @@ unsafe impl Sync for VmnetProxy {}
 impl VmnetProxy {
     /// Start a vmnet interface and spin up the userspace pump threads.
     pub(crate) fn start(cfg: &VmnetConfig) -> crate::Result<Arc<Self>> {
-        let (iface, params) = start_interface(cfg)?;
+        let (iface, params) = start_interface(cfg).map_err(|e| {
+            if matches!(e.code, VmnetReturn::InvalidAccess) {
+                tracing::warn!(
+                    "vmnet denied (VMNET_INVALID_ACCESS): binary is missing \
+                     com.apple.vm.networking entitlement, is ad-hoc signed on \
+                     macOS 26+, or is not running as root. Re-sign with a \
+                     Developer ID provisioning profile or run as root to use \
+                     NetAttachment::Vmnet; otherwise call probe_vmnet() at \
+                     startup and fall back to NetAttachment::Nat."
+                );
+            }
+            Error::from(e)
+        })?;
         let info: VmnetInterfaceInfo = (&params).into();
 
         let (host_raw, vz_raw) = make_socketpair(params.max_packet_size as usize)?;

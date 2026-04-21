@@ -37,10 +37,14 @@ pub(crate) type InterfaceRef = *mut c_void;
 pub(crate) type XpcObject = *mut c_void;
 
 /// Return codes for `vmnet_*` functions. Values from `<vmnet/vmnet.h>`.
+///
+/// Re-exported for diagnostics — notably, [`VmnetProbe::Unavailable`]
+/// carries one of these to describe why a vmnet start attempt failed.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-pub(crate) enum VmnetReturn {
+#[non_exhaustive]
+pub enum VmnetReturn {
     Success = 1000,
     Failure = 1001,
     MemFailure = 1002,
@@ -200,11 +204,18 @@ extern "C" {
 pub(crate) struct VmnetError {
     pub code: VmnetReturn,
     pub context: &'static str,
+    /// Optional free-form detail from a wrapped error (e.g. a
+    /// malformed-config message from `build_start_dict`). `None` for
+    /// errors that originate directly from a `vmnet_*` return code.
+    pub detail: Option<String>,
 }
 
 impl std::fmt::Display for VmnetError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.context, self.code)
+        match &self.detail {
+            Some(d) => write!(f, "{}: {} ({d})", self.context, self.code),
+            None => write!(f, "{}: {}", self.context, self.code),
+        }
     }
 }
 
@@ -327,10 +338,12 @@ fn parse_params(dict: XpcObject) -> Result<VmnetStartParams, VmnetError> {
         let mac_str = read_string(dict, vmnet_mac_address_key).ok_or(VmnetError {
             code: VmnetReturn::Failure,
             context: "vmnet returned params without a MAC address",
+            detail: None,
         })?;
         let mac = MacAddress::parse(&mac_str).ok_or(VmnetError {
             code: VmnetReturn::Failure,
             context: "vmnet returned an unparseable MAC address",
+            detail: None,
         })?;
 
         let mtu = xpc_dictionary_get_uint64(dict, vmnet_mtu_key) as u32;
@@ -361,10 +374,27 @@ fn parse_params(dict: XpcObject) -> Result<VmnetStartParams, VmnetError> {
 /// Start a vmnet interface and block until the completion handler fires.
 /// On success returns a live handle and the params dict (assigned MAC,
 /// MTU, DHCP range).
+///
+/// Returns `VmnetError` (not `crate::Error`) so callers — in particular
+/// [`crate::vm::vmnet_probe::probe_vmnet`] — can distinguish `InvalidAccess`
+/// (hard entitlement denial) from `SharingServiceBusy` (transient) and
+/// other return codes without string-matching.
 pub(crate) fn start_interface(
     cfg: &VmnetConfig,
-) -> crate::Result<(VmnetInterfaceHandle, VmnetStartParams)> {
-    let desc = build_start_dict(cfg)?;
+) -> Result<(VmnetInterfaceHandle, VmnetStartParams), VmnetError> {
+    let desc = match build_start_dict(cfg) {
+        Ok(d) => d,
+        Err(e) => {
+            // build_start_dict returns crate::Error::InvalidDevice for
+            // malformed configs. Map to a synthetic VmnetError so the
+            // callsite keeps a uniform error type.
+            return Err(VmnetError {
+                code: VmnetReturn::InvalidArgument,
+                context: "build_start_dict",
+                detail: Some(e.to_string()),
+            });
+        }
+    };
 
     let queue = DispatchQueue::new("com.vfrust.vmnet", DispatchQueueAttr::SERIAL);
 
@@ -383,6 +413,7 @@ pub(crate) fn start_interface(
             Err(VmnetError {
                 code,
                 context: "vmnet_start_interface completion",
+                detail: None,
             })
         };
         let (lock, cvar) = &*slot_for_block;
@@ -398,9 +429,15 @@ pub(crate) fn start_interface(
     unsafe { xpc_release(desc) };
 
     if iface.is_null() {
-        return Err(crate::Error::InvalidDevice(
-            "vmnet_start_interface returned null iface — entitlement missing?".into(),
-        ));
+        // Synchronous rejection from vmnet_start_interface — the completion
+        // handler will not fire. In practice this is the AMFI/entitlement
+        // denial path on macOS 26+ ad-hoc signed binaries. Report it as
+        // InvalidAccess so `probe_vmnet` can classify it as Denied.
+        return Err(VmnetError {
+            code: VmnetReturn::InvalidAccess,
+            context: "vmnet_start_interface returned null iface",
+            detail: Some("entitlement denied, binary not codesigned for vmnet, or insufficient privileges".into()),
+        });
     }
 
     // Wait for completion.
@@ -409,7 +446,7 @@ pub(crate) fn start_interface(
     while guard.is_none() {
         guard = cvar.wait(guard).unwrap();
     }
-    let params = guard.take().unwrap().map_err(crate::Error::from)?;
+    let params = guard.take().unwrap()?;
 
     Ok((
         VmnetInterfaceHandle {
@@ -446,6 +483,7 @@ pub(crate) fn stop_interface(handle: VmnetInterfaceHandle) -> crate::Result<()> 
         return Err(VmnetError {
             code: submit_code,
             context: "vmnet_stop_interface submit",
+            detail: None,
         }
         .into());
     }
@@ -460,6 +498,7 @@ pub(crate) fn stop_interface(handle: VmnetInterfaceHandle) -> crate::Result<()> 
         return Err(VmnetError {
             code,
             context: "vmnet_stop_interface completion",
+            detail: None,
         }
         .into());
     }
@@ -483,6 +522,7 @@ pub(crate) fn read_packets(
         return Err(VmnetError {
             code,
             context: "vmnet_read",
+            detail: None,
         });
     }
     Ok(count.max(0) as usize)
@@ -500,6 +540,7 @@ pub(crate) fn write_packets(
         return Err(VmnetError {
             code,
             context: "vmnet_write",
+            detail: None,
         });
     }
     Ok(count.max(0) as usize)
@@ -532,6 +573,7 @@ pub(crate) fn set_packets_available_callback(
         return Err(VmnetError {
             code,
             context: "vmnet_interface_set_event_callback",
+            detail: None,
         });
     }
 
@@ -615,6 +657,7 @@ mod tests {
         let e = VmnetError {
             code: VmnetReturn::InvalidAccess,
             context: "testing",
+            detail: None,
         };
         let s = format!("{e}");
         assert!(s.contains("testing"));
