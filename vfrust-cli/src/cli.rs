@@ -62,4 +62,9 @@ pub struct Cli {
     /// Enable nested virtualization
     #[arg(long)]
     pub nested: bool,
+
+    /// Print host-observed VM resource usage every N seconds.
+    /// See `ResourceUsage` in the vfrust crate for the caveat list.
+    #[arg(long, value_name = "SECS")]
+    pub metrics_interval: Option<u64>,
 }
