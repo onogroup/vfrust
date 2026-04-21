@@ -312,6 +312,11 @@ fn build_virtio_net(net: &VirtioNet) -> crate::Result<Retained<VZNetworkDeviceCo
                 );
                 config.setAttachment(Some(&attachment));
             }
+            NetAttachment::Vmnet(_) => {
+                return Err(crate::Error::InvalidDevice(
+                    "NetAttachment::Vmnet support not yet wired into sys/device.rs — will be enabled in a follow-up commit in this series".into(),
+                ));
+            }
         }
 
         if let Some(mac) = &net.mac_address {
