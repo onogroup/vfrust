@@ -8,9 +8,15 @@ use crate::config::vm::VmConfig;
 use crate::sys::bootloader::build_bootloader;
 use crate::sys::device::build_devices;
 
-pub(crate) fn build_vz_config(
-    config: &VmConfig,
-) -> crate::Result<Retained<VZVirtualMachineConfiguration>> {
+/// Output of `build_vz_config`: the VZ configuration plus any live
+/// side-effect resources (currently `VmnetProxy` packet pumps) that must
+/// be kept alive on `InnerMachine` for the VM's lifetime.
+pub(crate) struct BuiltVzConfig {
+    pub vz_config: Retained<VZVirtualMachineConfiguration>,
+    pub network_proxies: Vec<std::sync::Arc<crate::vm::vmnet_proxy::VmnetProxy>>,
+}
+
+pub(crate) fn build_vz_config(config: &VmConfig) -> crate::Result<BuiltVzConfig> {
     // Validate: nested virtualization cannot be used with macOS bootloader.
     if config.nested && matches!(config.bootloader, Bootloader::MacOs(_)) {
         return Err(crate::Error::InvalidConfiguration(
@@ -65,7 +71,10 @@ pub(crate) fn build_vz_config(
             }
         }
 
-        Ok(vz_config)
+        Ok(BuiltVzConfig {
+            vz_config,
+            network_proxies: built.network_proxies,
+        })
     }
 }
 

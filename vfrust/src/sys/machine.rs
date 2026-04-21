@@ -15,6 +15,12 @@ use crate::sys::config_builder::build_vz_config;
 use crate::sys::delegate::{DelegateEvent, VmDelegate};
 use crate::sys::process_info;
 use crate::vm::state::VmState;
+use crate::vm::vmnet_proxy::VmnetProxy;
+
+/// Shared list of `VmnetProxy` instances attached to a VM. Mirrors the
+/// `WorkerSlot` pattern — lives on `InnerMachine`, cloned into `VmHandle`
+/// for sampling.
+pub(crate) type NetworkProxies = Arc<Mutex<Vec<Arc<VmnetProxy>>>>;
 
 /// Identity of the `com.apple.Virtualization.VirtualMachine` worker subprocess
 /// that backs a running `VZVirtualMachine`. Stashed at start-completion time
@@ -248,11 +254,18 @@ pub(crate) struct InnerMachine {
     /// metric sampling via `proc_pid_rusage`. `None` when the VM is not
     /// running (or before the first start completion fires).
     pub(crate) worker: WorkerSlot,
+    /// Live `VmnetProxy` instances keeping the vmnet bridge interfaces
+    /// up for this VM's NICs. Dropping an `InnerMachine` drops these,
+    /// which joins the pumps and calls `vmnet_stop_interface`. Empty for
+    /// VMs with no `NetAttachment::Vmnet` NICs.
+    pub(crate) network_proxies: NetworkProxies,
 }
 
 impl InnerMachine {
     pub(crate) fn new(config: VmConfig) -> crate::Result<Self> {
-        let vz_config = build_vz_config(&config)?;
+        let built = build_vz_config(&config)?;
+        let vz_config = built.vz_config;
+        let network_proxies: NetworkProxies = Arc::new(Mutex::new(built.network_proxies));
         let queue = DispatchQueue::new("com.vfrust.vm", DispatchQueueAttr::SERIAL);
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<DelegateEvent>();
@@ -359,11 +372,16 @@ impl InnerMachine {
             config,
             snapshot,
             worker,
+            network_proxies,
         })
     }
 
     pub(crate) fn worker(&self) -> WorkerSlot {
         self.worker.clone()
+    }
+
+    pub(crate) fn network_proxies(&self) -> NetworkProxies {
+        self.network_proxies.clone()
     }
 
     pub(crate) fn vm_ptr(&self) -> VmPtr {

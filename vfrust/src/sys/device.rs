@@ -31,6 +31,12 @@ pub(crate) struct BuiltDevices {
     pub dir_sharing: Retained<NSArray<VZDirectorySharingDeviceConfiguration>>,
     pub audio: Retained<NSArray<VZAudioDeviceConfiguration>>,
     pub usb_controllers: Retained<NSArray<VZUSBControllerConfiguration>>,
+    /// `VmnetProxy` instances for any `NetAttachment::Vmnet` devices. One
+    /// entry per such device, in the order they were configured. Non-Vmnet
+    /// network devices produce no entry. Stored on `InnerMachine` to keep
+    /// the pumps alive for the VM's lifetime; the pumps (and the bridge
+    /// interface) tear down when these are dropped.
+    pub network_proxies: Vec<std::sync::Arc<crate::vm::vmnet_proxy::VmnetProxy>>,
 }
 
 pub(crate) fn build_devices(devices: &[Device]) -> crate::Result<BuiltDevices> {
@@ -46,6 +52,7 @@ pub(crate) fn build_devices(devices: &[Device]) -> crate::Result<BuiltDevices> {
     let mut dir_sharing_list: Vec<Retained<VZDirectorySharingDeviceConfiguration>> = Vec::new();
     let mut audio_list: Vec<Retained<VZAudioDeviceConfiguration>> = Vec::new();
     let mut usb_controller_list: Vec<Retained<VZUSBControllerConfiguration>> = Vec::new();
+    let mut network_proxies: Vec<std::sync::Arc<crate::vm::vmnet_proxy::VmnetProxy>> = Vec::new();
 
     for device in devices {
         match device {
@@ -53,7 +60,13 @@ pub(crate) fn build_devices(devices: &[Device]) -> crate::Result<BuiltDevices> {
             Device::Nvme(nvme) => storage_list.push(build_nvme(nvme)?),
             Device::UsbMassStorage(usb) => storage_list.push(build_usb_mass_storage(usb)?),
             Device::Nbd(nbd) => storage_list.push(build_nbd(nbd)?),
-            Device::VirtioNet(net) => network_list.push(build_virtio_net(net)?),
+            Device::VirtioNet(net) => {
+                let (vz, proxy) = build_virtio_net(net)?;
+                network_list.push(vz);
+                if let Some(p) = proxy {
+                    network_proxies.push(p);
+                }
+            }
             Device::VirtioSerial(serial) => serial_list.push(build_virtio_serial(serial)?),
             Device::VirtioVsock(vsock) => socket_list.push(build_virtio_vsock(vsock)?),
             Device::VirtioGpu(gpu) => graphics_list.push(build_virtio_gpu(gpu)?),
@@ -84,6 +97,7 @@ pub(crate) fn build_devices(devices: &[Device]) -> crate::Result<BuiltDevices> {
         dir_sharing: NSArray::from_retained_slice(&dir_sharing_list),
         audio: NSArray::from_retained_slice(&audio_list),
         usb_controllers: NSArray::from_retained_slice(&usb_controller_list),
+        network_proxies,
     })
 }
 
@@ -284,9 +298,15 @@ fn build_nbd(nbd: &Nbd) -> crate::Result<Retained<VZStorageDeviceConfiguration>>
 // Network
 // ---------------------------------------------------------------------------
 
-fn build_virtio_net(net: &VirtioNet) -> crate::Result<Retained<VZNetworkDeviceConfiguration>> {
+fn build_virtio_net(
+    net: &VirtioNet,
+) -> crate::Result<(
+    Retained<VZNetworkDeviceConfiguration>,
+    Option<std::sync::Arc<crate::vm::vmnet_proxy::VmnetProxy>>,
+)> {
     unsafe {
         let config = VZVirtioNetworkDeviceConfiguration::new();
+        let mut proxy_out: Option<std::sync::Arc<crate::vm::vmnet_proxy::VmnetProxy>> = None;
 
         match &net.attachment {
             NetAttachment::Nat => {
@@ -312,10 +332,41 @@ fn build_virtio_net(net: &VirtioNet) -> crate::Result<Retained<VZNetworkDeviceCo
                 );
                 config.setAttachment(Some(&attachment));
             }
-            NetAttachment::Vmnet(_) => {
-                return Err(crate::Error::InvalidDevice(
-                    "NetAttachment::Vmnet support not yet wired into sys/device.rs — will be enabled in a follow-up commit in this series".into(),
-                ));
+            NetAttachment::Vmnet(cfg) => {
+                // Start the vmnet interface, its userspace packet pumps,
+                // and hand the VZ-side of the socketpair to
+                // `VZFileHandleNetworkDeviceAttachment`. The proxy is
+                // returned to the caller for storage on `InnerMachine` —
+                // it must outlive the VM or vmnet tears down the bridge.
+                let proxy = crate::vm::vmnet_proxy::VmnetProxy::start(cfg)?;
+                let vz_fd = proxy.take_vz_fd();
+                let fh = objc2_foundation::NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+                    objc2_foundation::NSFileHandle::alloc(),
+                    vz_fd,
+                    true,
+                );
+                let attachment = VZFileHandleNetworkDeviceAttachment::initWithFileHandle(
+                    VZFileHandleNetworkDeviceAttachment::alloc(),
+                    &fh,
+                );
+                config.setAttachment(Some(&attachment));
+
+                // If the user didn't supply a MAC and didn't ask vmnet to
+                // allocate one, vmnet's assigned MAC (in `proxy.info().mac`)
+                // is what vmnet's DHCP will issue a lease to. VZ also wants
+                // to know the MAC so guest and vmnet agree — if the user
+                // hasn't already set one, adopt vmnet's.
+                if net.mac_address.is_none() {
+                    let mac_str = proxy.info().mac.to_string();
+                    let ns_mac_str = NSString::from_str(&mac_str);
+                    if let Some(vz_mac) =
+                        VZMACAddress::initWithString(VZMACAddress::alloc(), &ns_mac_str)
+                    {
+                        config.setMACAddress(&vz_mac);
+                    }
+                }
+
+                proxy_out = Some(proxy);
             }
         }
 
@@ -329,7 +380,7 @@ fn build_virtio_net(net: &VirtioNet) -> crate::Result<Retained<VZNetworkDeviceCo
             }
         }
 
-        Ok(Retained::into_super(config))
+        Ok((Retained::into_super(config), proxy_out))
     }
 }
 
