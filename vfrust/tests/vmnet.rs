@@ -87,7 +87,11 @@ fn try_start(
         Ok(vm) => vm,
         Err(e) => {
             let s = e.to_string();
-            if s.contains("InvalidAccess") || s.contains("vmnet entitlement") {
+            // `VmnetReturn::InvalidAccess` renders as "invalid access" via
+            // its `Display` impl; match either the code name or the human
+            // string so both raw debug and formatted forms are covered.
+            let lc = s.to_lowercase();
+            if lc.contains("invalid access") || lc.contains("invalidaccess") {
                 eprintln!("skipping vmnet test: {s}");
                 return Ok(None);
             }
