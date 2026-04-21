@@ -3,6 +3,7 @@ pub(crate) mod config_builder;
 pub(crate) mod delegate;
 pub(crate) mod device;
 pub(crate) mod machine;
+pub(crate) mod process_info;
 
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2::rc::Retained;
