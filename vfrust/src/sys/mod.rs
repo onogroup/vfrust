@@ -4,6 +4,7 @@ pub(crate) mod delegate;
 pub(crate) mod device;
 pub(crate) mod machine;
 pub(crate) mod process_info;
+pub(crate) mod vmnet;
 
 use objc2_foundation::{NSError, NSString, NSURL};
 use objc2::rc::Retained;
