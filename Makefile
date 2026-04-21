@@ -25,7 +25,7 @@ test-e2e:
 	            target/debug/deps/network-* target/debug/deps/cloudinit_e2e-* \
 	            target/debug/deps/serial-* target/debug/deps/devices-* \
 	            target/debug/deps/storage-* target/debug/deps/fs_share-* \
-	            target/debug/deps/snapshot-*; do \
+	            target/debug/deps/snapshot-* target/debug/deps/metrics-*; do \
 	    if [ -f "$$bin" ] && [ -x "$$bin" ]; then \
 	        codesign --force --entitlements vfrust.entitlements -s - "$$bin" 2>/dev/null || true; \
 	    fi; \
