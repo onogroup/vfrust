@@ -99,6 +99,19 @@ impl VirtualMachine {
         self.inner.dispatch_restore_state(path, tx);
         rx.await.map_err(|_| crate::Error::DispatchError("channel closed".into()))?
     }
+
+    /// Sample host-observed resource usage of the VZ worker process.
+    ///
+    /// See [`VmHandle::resource_usage`] for semantics.
+    pub fn resource_usage(&self) -> Option<crate::vm::metrics::ResourceUsage> {
+        self.handle().resource_usage()
+    }
+
+    /// OS PID of the VZ worker process backing this VM, or `None` when
+    /// no worker is active.
+    pub fn worker_pid(&self) -> Option<u32> {
+        self.handle().worker_pid()
+    }
 }
 
 /// Drop force-stops a running VM and clears the ObjC delegate before

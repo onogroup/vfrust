@@ -21,5 +21,10 @@ pub use config::{
     vm::{VmBuilder, VmConfig},
 };
 pub use error::{Error, Result, VzErrorCode};
-pub use vm::{handle::VmHandle, machine::VirtualMachine, state::VmState};
+pub use vm::{
+    handle::VmHandle,
+    machine::VirtualMachine,
+    metrics::{ResourceDelta, ResourceUsage},
+    state::VmState,
+};
 pub use vsock::VsockConnection;

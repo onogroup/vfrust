@@ -15,6 +15,18 @@ use vfrust::config::device::vsock::VirtioVsock;
 use vfrust::config::device::Device;
 use vfrust::{VirtualMachine, VmConfig};
 
+/// Format the current time as `HH:MM:SS` in UTC.  Zero new deps.
+fn chrono_like_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
 /// Guard that removes a PID file when dropped.
 struct PidFileGuard {
     path: PathBuf,
@@ -142,6 +154,7 @@ fn main() {
     }
 
     let timesync_port = cli.timesync;
+    let metrics_interval_secs = cli.metrics_interval;
 
     // PID file (create before VM, cleaned up on drop)
     let _pid_guard = cli.pidfile.as_ref().map(|path| {
@@ -198,6 +211,32 @@ fn main() {
         // Start time synchronization if requested
         if let Some(port) = timesync_port {
             timesync::start_timesync(handle.clone(), port, tokio::runtime::Handle::current());
+        }
+
+        // Periodically print host-observed resource usage if requested.
+        if let Some(secs) = metrics_interval_secs {
+            let secs = secs.max(1);
+            let handle_metrics = handle.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(secs));
+                // Skip the immediate first tick so the worker has time to fork.
+                ticker.tick().await;
+                loop {
+                    ticker.tick().await;
+                    match handle_metrics.resource_usage() {
+                        Some(u) => {
+                            let ts = chrono_like_timestamp();
+                            println!(
+                                "[{ts}] pid={} {u}",
+                                handle_metrics.worker_pid().unwrap_or(0),
+                            );
+                        }
+                        None => {
+                            tracing::debug!("metrics sample: worker not yet available");
+                        }
+                    }
+                }
+            });
         }
 
         // Set up vsock proxies from device configuration

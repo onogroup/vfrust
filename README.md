@@ -14,6 +14,7 @@ A Rust library and CLI for managing macOS virtual machines using Apple's [Virtua
 - **Time synchronization** — optional host→guest time sync over vsock
 - **Nested virtualization** — run VMs inside VMs on supported hardware
 - **JSON config** — serialize/deserialize VM configurations
+- **Metrics** — host-observed CPU / memory / disk / page-ins / energy per VM, sampled cheaply from the VZ worker subprocess
 
 ## Requirements
 
@@ -87,6 +88,7 @@ vfrust-cli [OPTIONS]
 | `--gui` | Open a GUI window (auto-adds GPU + keyboard + pointing device) |
 | `--cloud-init <FILES>` | Comma-separated cloud-init file paths (meta-data, user-data, network-config) |
 | `--timesync <PORT>` | Enable host→guest time sync over vsock on the given port |
+| `--metrics-interval <SECS>` | Print host-observed VM resource usage every N seconds |
 | `--nested` | Enable nested virtualization |
 | `--pidfile <PATH>` | Write PID to file (removed on exit) |
 | `--log-level <LEVEL>` | Log level: debug, info, warn, error (default: info) |
@@ -156,6 +158,39 @@ let handle = vm.handle(); // Send + Sync, use from any thread
 // handle.save_state(path).await
 // handle.restore_state(path).await
 ```
+
+## Metrics
+
+Sample host-observed VM resource usage from a running VM:
+
+```rust
+use vfrust::{VirtualMachine, VmConfig};
+
+let vm = VirtualMachine::new(config)?;
+let handle = vm.handle();
+handle.start().await?;
+
+if let Some(usage) = handle.resource_usage() {
+    println!("{usage}");
+    // cpu=1.23s mem=512MiB disk=r:12MiB/w:4MiB
+}
+```
+
+`ResourceUsage` reports CPU time, memory footprint, disk I/O, page-ins, and
+(on Apple Silicon) billed energy and CPU perf counters for the
+`com.apple.Virtualization.VirtualMachine` worker subprocess that backs each
+VM — the same source Activity Monitor reads.
+
+The values are **host-observed**, not guest-internal: CPU time is real host
+time the hypervisor consumed, memory is host backing footprint (≈ allocated
+physical minus ballooned pages, not guest-free memory), and disk I/O is the
+aggregate across all image attachments. Network counters are not reported
+(Apple does not expose them at the framework layer). On Intel Macs the
+`energy_nj`, `instructions`, and `cycles` fields are always `0`.
+
+Use `ResourceUsage::delta_since` to compute per-interval rates from two
+samples cheaply; see the [`ResourceUsage`](vfrust/src/vm/metrics.rs) doc
+comment for the full caveat list.
 
 ## Testing
 

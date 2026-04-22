@@ -75,10 +75,7 @@ fn find_tool(names: &[&str], nix_pkg: &str) -> String {
     if let Some(path) = find_in_nix_store(nix_pkg, names[0]) {
         return path;
     }
-    panic!(
-        "{} not found in PATH or /nix/store",
-        names.join(" / ")
-    );
+    panic!("{} not found in PATH or /nix/store", names.join(" / "));
 }
 
 fn find_qemu_img() -> String {
@@ -175,9 +172,12 @@ pub fn ensure_raw_kernel() -> PathBuf {
         // Try nix binary cache
         if let Ok(out) = Command::new("nix")
             .args([
-                "build", "--system", "aarch64-linux",
+                "build",
+                "--system",
+                "aarch64-linux",
                 "nixpkgs#linuxPackages_latest.kernel",
-                "--no-link", "--print-out-paths",
+                "--no-link",
+                "--print-out-paths",
             ])
             .output()
         {
@@ -235,7 +235,10 @@ pub fn ensure_alpine_initramfs() -> PathBuf {
     eprintln!("Downloading Alpine Linux initramfs...");
     let status = Command::new("curl")
         .args([
-            "-L", "-f", "-o", initramfs.to_str().unwrap(),
+            "-L",
+            "-f",
+            "-o",
+            initramfs.to_str().unwrap(),
             "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/netboot/initramfs-virt",
         ])
         .status()
@@ -275,9 +278,7 @@ pub fn create_cloudinit_iso(test_name: &str) -> TestFile {
     let user_data = format!(
         "#cloud-config\nusers:\n  - name: ubuntu\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh_authorized_keys:\n      - {ssh_pub}\nssh_pwauth: false\npackage_update: false\n"
     );
-    let meta_data = format!(
-        "instance-id: {test_name}\nlocal-hostname: {test_name}\n"
-    );
+    let meta_data = format!("instance-id: {test_name}\nlocal-hostname: {test_name}\n");
     let network_config = "version: 2\nethernets:\n  enp0s1:\n    dhcp4: true\n";
 
     std::fs::write(dir.path().join("user-data"), user_data).unwrap();
@@ -290,9 +291,12 @@ pub fn create_cloudinit_iso(test_name: &str) -> TestFile {
     let mkisofs = find_mkisofs();
     let status = Command::new(&mkisofs)
         .args([
-            "-output", iso_path.to_str().unwrap(),
-            "-volid", "cidata",
-            "-joliet", "-rock",
+            "-output",
+            iso_path.to_str().unwrap(),
+            "-volid",
+            "cidata",
+            "-joliet",
+            "-rock",
             dir.path().to_str().unwrap(),
         ])
         .stdout(std::process::Stdio::null())
@@ -332,6 +336,19 @@ pub fn efi_vm_config(
     serial_log: Option<&Path>,
     extra_devices: Vec<Device>,
 ) -> VmConfig {
+    efi_vm_config_with_mac(disk, cloudinit_iso, serial_log, extra_devices, test_mac())
+}
+
+/// Like [`efi_vm_config`] but with an explicit MAC address. Use when a
+/// single test needs to run multiple VMs concurrently and must avoid
+/// DHCP collisions on the same MAC.
+pub fn efi_vm_config_with_mac(
+    disk: &Path,
+    cloudinit_iso: Option<&Path>,
+    serial_log: Option<&Path>,
+    extra_devices: Vec<Device>,
+    mac: MacAddress,
+) -> VmConfig {
     let efi_store = test_assets_dir().join(format!(
         "efi-{}.fd",
         disk.file_stem().unwrap().to_str().unwrap()
@@ -351,7 +368,7 @@ pub fn efi_vm_config(
         }))
         .device(Device::VirtioNet(VirtioNet {
             attachment: NetAttachment::Nat,
-            mac_address: Some(test_mac()),
+            mac_address: Some(mac),
         }))
         .device(Device::VirtioRng);
 
@@ -438,8 +455,20 @@ fn resolve_ip_from_arp(mac_str: &str) -> Option<String> {
 /// 1. Polls the host ARP table for the test MAC (instant, no SSH).
 /// 2. Once the IP is known, verifies SSH connectivity and hostname.
 pub async fn find_vm_ip(expected_hostname: &str, timeout: Duration) -> Option<String> {
+    find_vm_ip_with_mac(expected_hostname, test_mac(), timeout).await
+}
+
+/// Like [`find_vm_ip`] but with an explicit MAC. Use when a test builds its
+/// VM with a non-default MAC via [`efi_vm_config_with_mac`] (e.g. to avoid
+/// ARP-cache aliasing across back-to-back single-VM tests that reuse the
+/// default test MAC).
+pub async fn find_vm_ip_with_mac(
+    expected_hostname: &str,
+    mac: MacAddress,
+    timeout: Duration,
+) -> Option<String> {
     let hostname = expected_hostname.to_string();
-    let mac_str = mac_to_arp_format(&test_mac());
+    let mac_str = mac_to_arp_format(&mac);
 
     tokio::task::spawn_blocking(move || {
         let start = std::time::Instant::now();
@@ -460,11 +489,16 @@ pub async fn find_vm_ip(expected_hostname: &str, timeout: Duration) -> Option<St
         while start.elapsed() < timeout {
             let output = Command::new("ssh")
                 .args([
-                    "-o", "StrictHostKeyChecking=no",
-                    "-o", "UserKnownHostsFile=/dev/null",
-                    "-o", "ConnectTimeout=2",
-                    "-o", "BatchMode=yes",
-                    "-o", "LogLevel=ERROR",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "ConnectTimeout=2",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "LogLevel=ERROR",
                     "-i",
                     &key_path.to_string_lossy(),
                     &format!("ubuntu@{ip}"),
@@ -490,17 +524,21 @@ pub async fn find_vm_ip(expected_hostname: &str, timeout: Duration) -> Option<St
 
 /// SSH into a VM and run a command, returning stdout.
 pub fn ssh_command(ip: &str, cmd: &str) -> Result<String, String> {
-    let key_path = dirs::home_dir()
-        .unwrap()
-        .join(".ssh/id_ed25519");
+    let key_path = dirs::home_dir().unwrap().join(".ssh/id_ed25519");
     let output = Command::new("ssh")
         .args([
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=5",
-            "-o", "BatchMode=yes",
-            "-o", "LogLevel=ERROR",
-            "-i", &key_path.to_string_lossy(),
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "LogLevel=ERROR",
+            "-i",
+            &key_path.to_string_lossy(),
             &format!("ubuntu@{ip}"),
             cmd,
         ])

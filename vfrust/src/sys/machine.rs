@@ -1,7 +1,9 @@
-use std::sync::Mutex;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use libc::pid_t;
 use objc2::rc::Retained;
 use objc2::AllocAnyThread;
 use objc2_foundation::NSError;
@@ -11,7 +13,37 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::config::vm::VmConfig;
 use crate::sys::config_builder::build_vz_config;
 use crate::sys::delegate::{DelegateEvent, VmDelegate};
+use crate::sys::process_info;
 use crate::vm::state::VmState;
+
+/// Identity of the `com.apple.Virtualization.VirtualMachine` worker subprocess
+/// that backs a running `VZVirtualMachine`. Stashed at start-completion time
+/// so per-sample rusage reads can verify the process is still ours
+/// (PID-reuse guard via `start_abstime`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WorkerIdentity {
+    pub pid: pid_t,
+    pub start_abstime: u64,
+}
+
+pub(crate) type WorkerSlot = Arc<Mutex<Option<WorkerIdentity>>>;
+
+/// Process-wide registry of VZ worker PIDs already attributed to a
+/// running VM in this host process. Consulted with a short-lived lock
+/// at claim/release time only — never held across async completion.
+///
+/// Concurrent starts are disambiguated by:
+///   (a) recording `submit_abstime = mach_absolute_time()` on each
+///       VM's serial queue *before* calling `startWithCompletionHandler`,
+///   (b) on completion, among VZ workers with
+///       `proc_start_abstime > submit_abstime` and not in this set,
+///       picking the one with the *smallest* `proc_start_abstime`
+///       (earliest fork after our submission must be ours — any later
+///       worker came from a later submission).
+fn claimed_workers() -> &'static Mutex<HashSet<pid_t>> {
+    static SET: OnceLock<Mutex<HashSet<pid_t>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 /// Wraps a raw pointer to VZVirtualMachine as usize for Send safety.
 /// The pointer is only dereferenced inside closures dispatched to the VM's
@@ -50,6 +82,75 @@ pub(crate) fn vz_state_to_rust(state: VZVirtualMachineState) -> VmState {
     }
 }
 
+/// Record the freshly-forked VZ worker PID after a successful start/restore.
+///
+/// Picks the VZ-worker child whose `proc_start_abstime` is strictly greater
+/// than `submit_abstime` (recorded just before `startWithCompletionHandler`)
+/// and not already claimed by another concurrent start in this process. On
+/// success stashes the PID plus its start-abstime (used later as a
+/// PID-reuse guard) and marks the PID as claimed.
+fn populate_worker_on_success(submit_abstime: u64, worker: &WorkerSlot) {
+    // Snapshot `already_claimed` under a short-lived lock, then run the
+    // selection outside the lock so rusage syscalls don't block other VMs.
+    let claimed_snapshot: HashSet<pid_t> = claimed_workers()
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+
+    // The VZ worker is XPC-launched asynchronously, so it may not appear in
+    // `proc_listallpids` in the same instant that the start completion block
+    // fires. A handful of short retries cheaply absorb that race window
+    // without adding any observable latency on the happy path.
+    let mut picked = None;
+    for attempt in 0..10 {
+        if let Some(hit) = process_info::pick_own_worker(submit_abstime, &claimed_snapshot) {
+            picked = Some(hit);
+            break;
+        }
+        if attempt < 9 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    let Some((pid, start_abstime)) = picked else {
+        tracing::warn!(
+            submit_abstime,
+            "vz worker pid discovery: no com.apple.Virtualization.* worker visible after submit"
+        );
+        return;
+    };
+
+    // Re-acquire the registry lock and insert; if someone else claimed the
+    // same PID between our snapshot and insertion (shouldn't happen, but be
+    // defensive), drop this candidate rather than double-attribute.
+    if let Ok(mut claimed) = claimed_workers().lock() {
+        if !claimed.insert(pid) {
+            tracing::warn!(pid, "vz worker pid already claimed by another VM; skipping");
+            return;
+        }
+    }
+
+    tracing::debug!(pid, start_abstime, submit_abstime, "vz worker discovered");
+    if let Ok(mut slot) = worker.lock() {
+        *slot = Some(WorkerIdentity { pid, start_abstime });
+    }
+}
+
+/// Clear the tracked worker identity and release its claim on the
+/// process-wide registry. Called on stop/error transitions.
+fn clear_worker(worker: &WorkerSlot, reason: &str) {
+    let released_pid = worker
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take())
+        .map(|id| id.pid);
+    if let Some(pid) = released_pid {
+        if let Ok(mut claimed) = claimed_workers().lock() {
+            claimed.remove(&pid);
+        }
+        tracing::debug!(pid, reason, "vz worker cleared");
+    }
+}
+
 /// Helper to create a completion handler block from a oneshot sender.
 /// Wraps the sender in Mutex<Option<>> so the block is Fn (not FnOnce).
 /// Must be called on the dispatch queue thread (RcBlock is !Send).
@@ -75,6 +176,61 @@ pub(crate) fn make_completion_block(
     })
 }
 
+/// Completion-handler variant that additionally attributes a freshly-forked
+/// VZ worker PID to this VM on success.
+///
+/// Identical to [`make_completion_block`] except that, on the success branch
+/// (before forwarding state + reply), it calls
+/// [`populate_worker_on_success`] so subsequent `resource_usage()` calls can
+/// find the right process. Used by `dispatch_start` / `dispatch_restore_state`.
+pub(crate) fn make_start_like_completion_block(
+    reply: Mutex<Option<oneshot::Sender<crate::Result<()>>>>,
+    state_tx: watch::Sender<VmState>,
+    ok_state: VmState,
+    err_state: VmState,
+    submit_abstime: u64,
+    worker: WorkerSlot,
+) -> RcBlock<dyn Fn(*mut NSError)> {
+    RcBlock::new(move |err: *mut NSError| {
+        if let Some(reply) = reply.lock().unwrap().take() {
+            if err.is_null() {
+                populate_worker_on_success(submit_abstime, &worker);
+                let _ = state_tx.send(ok_state);
+                let _ = reply.send(Ok(()));
+            } else {
+                let error = unsafe { &*err };
+                let _ = state_tx.send(err_state);
+                let _ = reply.send(Err(crate::sys::ns_error_to_error(error)));
+            }
+        }
+    })
+}
+
+/// Completion-handler variant that clears the tracked VZ worker on success.
+/// Used by `dispatch_stop` (and `dispatch_save_state` if desired — but save
+/// keeps the same worker, so it stays on the plain helper).
+pub(crate) fn make_stop_like_completion_block(
+    reply: Mutex<Option<oneshot::Sender<crate::Result<()>>>>,
+    state_tx: watch::Sender<VmState>,
+    ok_state: VmState,
+    err_state: VmState,
+    worker: WorkerSlot,
+) -> RcBlock<dyn Fn(*mut NSError)> {
+    RcBlock::new(move |err: *mut NSError| {
+        if let Some(reply) = reply.lock().unwrap().take() {
+            if err.is_null() {
+                clear_worker(&worker, "stop completion");
+                let _ = state_tx.send(ok_state);
+                let _ = reply.send(Ok(()));
+            } else {
+                let error = unsafe { &*err };
+                let _ = state_tx.send(err_state);
+                let _ = reply.send(Err(crate::sys::ns_error_to_error(error)));
+            }
+        }
+    })
+}
+
 /// Holds all the ObjC state on the dispatch queue.
 pub(crate) struct InnerMachine {
     pub(crate) vm: Retained<VZVirtualMachine>,
@@ -88,6 +244,10 @@ pub(crate) struct InnerMachine {
     /// identifier) resolved from Virtualization.framework.  Use this for
     /// save/restore round-trips.
     pub(crate) snapshot: VmConfig,
+    /// PID + start-time of the VZ worker subprocess backing this VM, for
+    /// metric sampling via `proc_pid_rusage`. `None` when the VM is not
+    /// running (or before the first start completion fires).
+    pub(crate) worker: WorkerSlot,
 }
 
 impl InnerMachine {
@@ -111,18 +271,22 @@ impl InnerMachine {
         }
 
         let (state_tx, _) = watch::channel(VmState::Stopped);
+        let worker: WorkerSlot = Arc::new(Mutex::new(None));
 
         let state_tx_clone = state_tx.clone();
+        let worker_clone = worker.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 match event {
                     DelegateEvent::GuestStopped => {
                         tracing::info!("guest stopped");
                         let _ = state_tx_clone.send(VmState::Stopped);
+                        clear_worker(&worker_clone, "guest stopped");
                     }
                     DelegateEvent::Error(msg) => {
                         tracing::error!("VM error: {msg}");
                         let _ = state_tx_clone.send(VmState::Error);
+                        clear_worker(&worker_clone, "vm error");
                     }
                     DelegateEvent::NetworkDisconnected(msg) => {
                         tracing::warn!("network disconnected: {msg}");
@@ -194,7 +358,12 @@ impl InnerMachine {
             state_tx,
             config,
             snapshot,
+            worker,
         })
+    }
+
+    pub(crate) fn worker(&self) -> WorkerSlot {
+        self.worker.clone()
     }
 
     pub(crate) fn vm_ptr(&self) -> VmPtr {
@@ -206,11 +375,19 @@ impl InnerMachine {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Starting);
         let reply = Mutex::new(Some(reply));
+        let worker = self.worker.clone();
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            // Record host time just before the framework call. Our forked
+            // VZ worker must have a strictly greater `proc_start_abstime`.
+            let submit_abstime = process_info::mach_absolute_time();
+            let block = make_start_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Running, VmState::Error)),
+                state_tx,
+                VmState::Running,
+                VmState::Error,
+                submit_abstime,
+                worker,
             );
             unsafe { vm_ptr.get().startWithCompletionHandler(&block) };
         });
@@ -251,11 +428,15 @@ impl InnerMachine {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Stopping);
         let reply = Mutex::new(Some(reply));
+        let worker = self.worker.clone();
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            let block = make_stop_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Stopped, VmState::Error)),
+                state_tx,
+                VmState::Stopped,
+                VmState::Error,
+                worker,
             );
             unsafe { vm_ptr.get().stopWithCompletionHandler(&block) };
         });
@@ -263,7 +444,10 @@ impl InnerMachine {
 
     pub(crate) fn dispatch_request_stop(&self, reply: oneshot::Sender<crate::Result<()>>) {
         let vm_ptr = self.vm_ptr();
-
+        // `requestStop` only asks the guest to shut down; the actual
+        // stop transition arrives via `DelegateEvent::GuestStopped`,
+        // which clears the worker. Nothing to do here on the worker
+        // slot — a sync clear would race with an in-flight shutdown.
         self.queue.exec_async(move || {
             let vm = unsafe { vm_ptr.get() };
             let result = unsafe { vm.requestStopWithError() };
@@ -320,6 +504,7 @@ impl InnerMachine {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Restoring);
         let reply = Mutex::new(Some(reply));
+        let worker = self.worker.clone();
 
         let url = match crate::sys::nsurl_from_path(path) {
             Ok(url) => url,
@@ -332,9 +517,15 @@ impl InnerMachine {
         };
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            // Restore forks a fresh worker, same as a cold start.
+            let submit_abstime = process_info::mach_absolute_time();
+            let block = make_start_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Paused, VmState::Stopped)),
+                state_tx,
+                VmState::Paused,
+                VmState::Stopped,
+                submit_abstime,
+                worker,
             );
             unsafe {
                 vm_ptr

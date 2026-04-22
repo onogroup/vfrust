@@ -5,7 +5,12 @@ use tokio::sync::{oneshot, watch};
 
 use crate::config::vm::VmConfig;
 use crate::error::Error;
-use crate::sys::machine::{make_completion_block, InnerMachine, VmPtr};
+use crate::sys::machine::{
+    make_completion_block, make_start_like_completion_block, make_stop_like_completion_block,
+    InnerMachine, VmPtr, WorkerSlot,
+};
+use crate::sys::process_info;
+use crate::vm::metrics::ResourceUsage;
 use crate::vm::state::VmState;
 
 /// A thread-safe handle to a [`VirtualMachine`](super::machine::VirtualMachine).
@@ -21,6 +26,7 @@ pub struct VmHandle {
     state_rx: watch::Receiver<VmState>,
     config: VmConfig,
     snapshot: VmConfig,
+    worker: WorkerSlot,
 }
 
 // Safety: VmHandle only dispatches closures onto the VM's serial queue.
@@ -37,6 +43,7 @@ impl VmHandle {
             state_rx: inner.state_tx.subscribe(),
             config: inner.config.clone(),
             snapshot: inner.snapshot.clone(),
+            worker: inner.worker(),
         }
     }
 
@@ -87,11 +94,20 @@ impl VmHandle {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Starting);
         let reply = Mutex::new(Some(tx));
+        let worker = self.worker.clone();
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            // Mark host time right before the framework call so we can
+            // disambiguate our freshly-forked VZ worker from any other
+            // VZ workers belonging to concurrent starts in this process.
+            let submit_abstime = process_info::mach_absolute_time();
+            let block = make_start_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Running, VmState::Error)),
+                state_tx,
+                VmState::Running,
+                VmState::Error,
+                submit_abstime,
+                worker,
             );
             unsafe { vm_ptr.get().startWithCompletionHandler(&block) };
         });
@@ -171,11 +187,15 @@ impl VmHandle {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Stopping);
         let reply = Mutex::new(Some(tx));
+        let worker = self.worker.clone();
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            let block = make_stop_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Stopped, VmState::Error)),
+                state_tx,
+                VmState::Stopped,
+                VmState::Error,
+                worker,
             );
             unsafe { vm_ptr.get().stopWithCompletionHandler(&block) };
         });
@@ -247,11 +267,18 @@ impl VmHandle {
         let state_tx = self.state_tx.clone();
         let _ = state_tx.send(VmState::Restoring);
         let reply = Mutex::new(Some(tx));
+        let worker = self.worker.clone();
 
         self.queue.exec_async(move || {
-            let block = make_completion_block(
+            // Restore forks a fresh VZ worker, same as a cold start.
+            let submit_abstime = process_info::mach_absolute_time();
+            let block = make_start_like_completion_block(
                 reply,
-                Some((state_tx, VmState::Paused, VmState::Stopped)),
+                state_tx,
+                VmState::Paused,
+                VmState::Stopped,
+                submit_abstime,
+                worker,
             );
             unsafe {
                 vm_ptr
@@ -262,5 +289,51 @@ impl VmHandle {
 
         rx.await
             .map_err(|_| Error::DispatchError("channel closed".into()))?
+    }
+
+    /// Sample host-observed resource usage of the VZ worker process backing
+    /// this VM.
+    ///
+    /// Returns `None` when the VM is not running, the worker subprocess has
+    /// not yet been discovered (brief window at startup), or the underlying
+    /// `proc_pid_rusage` syscall fails. The call is sync, non-blocking, and
+    /// safe from any thread.
+    ///
+    /// Reads are guarded against OS PID reuse by verifying that the worker
+    /// still has the same `proc_start_abstime` recorded at discovery time
+    /// and is still identifiable as a VZ worker. If either check fails the
+    /// stored identity is left in place (the next lifecycle event will
+    /// clear it) but this call returns `None`.
+    pub fn resource_usage(&self) -> Option<ResourceUsage> {
+        let id = *self.worker.lock().ok()?.as_ref()?;
+        // Strong PID-reuse guard.
+        if process_info::proc_start_abstime(id.pid) != Some(id.start_abstime)
+            || !process_info::is_vz_worker(id.pid)
+        {
+            return None;
+        }
+        let info = process_info::proc_rusage_v4(id.pid)?;
+        Some(ResourceUsage {
+            sampled_at: std::time::SystemTime::now(),
+            cpu_user_ns: info.ri_user_time,
+            cpu_system_ns: info.ri_system_time,
+            resident_bytes: info.ri_resident_size,
+            phys_footprint_bytes: info.ri_phys_footprint,
+            peak_phys_footprint_bytes: info.ri_interval_max_phys_footprint,
+            wired_bytes: info.ri_wired_size,
+            disk_read_bytes: info.ri_diskio_bytesread,
+            disk_write_bytes: info.ri_diskio_byteswritten,
+            pageins: info.ri_pageins,
+            energy_nj: info.ri_billed_energy,
+            instructions: info.ri_instructions,
+            cycles: info.ri_cycles,
+        })
+    }
+
+    /// The OS PID of the VZ worker process backing this VM, or `None` when
+    /// no worker is active. Useful for cross-referencing with `ps` or
+    /// Activity Monitor.
+    pub fn worker_pid(&self) -> Option<u32> {
+        self.worker.lock().ok()?.as_ref().map(|w| w.pid as u32)
     }
 }
